@@ -5,6 +5,9 @@ import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
+import anndata as ad
+import random
+import pyro
 
 
 def detect_device():
@@ -288,6 +291,8 @@ def plot_results_multisample_sorted(
     a=1,
     scale_alpha=False,
     scale_values=False,
+    min_percentile=1,
+    max_percentile=99,
     savename=None,
     title=None
 ):
@@ -309,8 +314,8 @@ def plot_results_multisample_sorted(
         pattern_max = pattern_col.max()
 
         if scale_values:
-            pattern_min = np.percentile(pattern_col, 1)
-            pattern_max = np.percentile(pattern_col, 99)
+            pattern_min = np.percentile(pattern_col, min_percentile)
+            pattern_max = np.percentile(pattern_col, max_percentile)
 
         for j, (r, c) in enumerate([(r, c) for r in range(nrows) for c in range(ncols)]):
             if j < len(samples):
@@ -461,3 +466,148 @@ def debug_cuda_tensors(step, top_n=20):
     for size, shape, dtype, rg in tensors[:top_n]:
         print(f"  {size/1e6:.1f} MB  {shape}  {dtype}  requires_grad={rg}")
     print(f"  Total allocated: {torch.cuda.memory_allocated()/1e6:.1f} MB")
+
+
+
+
+def _pattern_markers_all(ssranks: pd.DataFrame):
+    # assign each row to the pattern with best (min) rank
+    p_idx = ssranks.values.argmin(axis=1)
+    markers = {}
+    for j, col in enumerate(ssranks.columns):
+        items_j = ssranks.index[p_idx == j].tolist()
+        items_j = sorted(items_j, key=lambda g: ssranks.loc[g, col])
+        markers[col] = items_j
+    return markers
+
+def _pattern_markers_cut(ssranks: pd.DataFrame):
+    """
+    Keep markers for a pattern until an item is ranked better (smaller)
+    in some OTHER pattern than in this one.
+    """
+    markers = {}
+    cols = list(ssranks.columns)
+
+    for col in cols:
+        sortSim = ssranks[col].sort_values(ascending=True).index
+        other_cols = [c for c in cols if c != col]
+
+        other_best = ssranks.loc[sortSim, other_cols].min(axis=1)
+        intra = ssranks.loc[sortSim, col]
+
+        bad = np.where(intra.values > other_best.values)[0]
+        geneThresh = bad[0] if len(bad) > 0 else len(sortSim)
+
+        markers[col] = sortSim[:geneThresh].tolist()
+
+    return markers
+
+
+def pattern_markers_pyronmf(
+    adata,
+    threshold="all",          # "all" or "cut"
+    lp=None,                  # optional dict/list of target vectors, values in [0,1], no other implementation yet
+    axis=1,                   # 1 = gene markers, 2 = cell/bin markers
+    A_key="mean_A",
+    P_key="mean_P"      
+):
+    """
+    CoGAPS-like patternMarkers for pyro_nmf outputs.
+
+    Returns dict with:
+      - PatternMarkers: dict(pattern -> list of markers)
+      - PatternRanks: DataFrame (items x patterns) integer ranks (lower = more associated)
+      - PatternScores: DataFrame (items x patterns) L2 distances (lower = closer)
+    """
+
+    # Load matrices
+    A = adata.varm[A_key]      # genes x n_patterns
+    P = adata.obsm[P_key]      # cells x n_patterns
+
+    if A.ndim != 2 or P.ndim != 2:
+        raise ValueError(f"A and P must be 2D. Got A.ndim={A.ndim}, P.ndim={P.ndim}")
+
+    if A.shape[1] != P.shape[1]:
+        raise ValueError(
+            f"Pattern count mismatch: A is genes×{A.shape[1]} but P is cells×{P.shape[1]}. "
+            f"Use matching keys (e.g., P_key='mean_P'    A_key='mean_A')."
+        )
+
+    if len(A_key) != len(P_key) or len(set(P_key) ^ set(A_key)) > 2: # ensure the keys are matching other than A/P, note that A_total may be an exception
+        raise Warning(
+            f"Matrix key mismatch: A_key='{A_key}' and P_key='{P_key}' do not match. "
+            f"This may be okay, but please ensure you are using matching keys (e.g., P_key='mean_P', A_key='mean_A')."
+        )
+
+    ## Option to switch between gene markers (default) and cell/bin markers
+    if axis == 1: # default, find gene markers
+        Amatrix = A.copy()       # genes x patterns
+        Pmatrix = P.T    # patterns x cells
+        item_names = Amatrix.index
+    elif axis == 2:
+        Amatrix = P.copy()       # cells x patterns
+        Pmatrix = A.T     # patterns x genes
+        item_names = Amatrix.index
+    else:
+        raise ValueError("axis must be 1 or 2")
+
+    ## Rescale P to be between 0 and 1, then scale A accordingly. puts full range in gene weights (or cell weights for axis = 2)
+    pscale = np.nanmax(Pmatrix, axis=1)     # find max P per pattern
+    Amatrix_scaled = Amatrix.multiply(pscale, axis=1) # multiply each column of A by the max of the corresponding column of P
+    Pmatrix_scaled = Pmatrix.T.div(pscale, axis=1) # divide each row of P by the max of the corresponding column of P, we don't actually need this
+
+    # Normalize each row of A to have max 1
+    rowmax = Amatrix_scaled.max(axis=1) # gene max
+    Arowmax = Amatrix_scaled.div(rowmax, axis=0)  # items x patterns. max is 1 across pattern (KW do I want this to be sum?)
+
+    nP = Arowmax.shape[1]
+    pattern_names = Amatrix.columns
+
+    # Build pseudo ideal pattern for each pattern (1 for pattern, 0 for others)
+    if lp is None:
+        # one-hot prototypes for all patterns
+        eye = np.eye(nP, dtype=float)
+        lp = {pattern_names[i]: eye[i] for i in range(nP)}
+    else:
+        ValueError("lp argument is not yet implemented. Please provide None to use default one-hot prototypes.")
+
+
+    # Create placeholder for ssranks or ssscores
+    ssranks = pd.DataFrame(index=item_names, columns=pattern_names, dtype=float)
+    ssscores = pd.DataFrame(index=item_names, columns=pattern_names, dtype=float)
+
+    X = Arowmax.values  # items x patterns
+
+    
+    # --- Compute L2 distance from each row to each lp vector ---
+
+    for pat in pattern_names:
+        target = lp[pat].reshape(1, -1)                # 1 x patterns
+        d = np.sqrt(((X - target) ** 2).sum(axis=1))   # L2 distance per item
+        ssscores[pat] = d
+        ssranks[pat] = pd.Series(d, index=item_names).rank(method="first", ascending=True)
+
+    ssranks = ssranks.astype(int)
+
+    # --- thresholding mode ---
+    if threshold == "all":
+        markers = _pattern_markers_all(ssranks)
+    elif threshold == "cut":
+        markers = _pattern_markers_cut(ssranks)
+    else:
+        raise ValueError("threshold must be 'all' or 'cut'")
+
+    return {
+        "PatternMarkers": markers,
+        "PatternRanks": ssranks,
+        "PatternScores": ssscores
+    }
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    pyro.set_rng_seed(seed)

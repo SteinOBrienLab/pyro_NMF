@@ -30,7 +30,7 @@ from pyroNMF.models.exp_NB_models import (
 #from pyroNMF.models.gamma_NB_hierarchicalAlpha import GammaHierarchicalAlpha_NegBinomial_base
 #from pyroNMF.models.gamma_NB_alphaPerPattern_fixedScale import GammaAlphaPerPattern_FixScale_NegBinomial_base
 
-from pyroNMF.utils import detect_device, plot_grid, plot_grid_noAlpha
+from pyroNMF.utils import detect_device, plot_grid, plot_grid_noAlpha, set_seed
 from torch.utils.tensorboard import SummaryWriter
 
 import torch
@@ -708,7 +708,7 @@ def _detect_and_save_parameters(result_anndata, model, settings, fixed_pattern_n
     learned_pattern_names = ["Pattern_" + str(x + 1) for x in range(num_learned_patterns)]
     # Always defined; only populated for supervised / semi-supervised runs.
     full_pattern_names = (
-        [str(x) for x in fixed_pattern_names] + learned_pattern_names
+        ['fixed_' + str(x) for x in fixed_pattern_names] + learned_pattern_names
         if fixed_pattern_names is not None
         else None
     )
@@ -814,7 +814,7 @@ def _detect_and_save_parameters(result_anndata, model, settings, fixed_pattern_n
     if hasattr(model, "fixed_P"):
         result_anndata.obsm["fixed_P"] = pd.DataFrame(
             model.fixed_P.detach().cpu().numpy(),
-            columns=[str(p) for p in fixed_pattern_names],
+            columns=['fixed_' + str(p) for p in fixed_pattern_names],
             index=result_anndata.obs.index,
         )
         print("Saving fixed P in anndata.obsm['fixed_P']")
@@ -822,7 +822,7 @@ def _detect_and_save_parameters(result_anndata, model, settings, fixed_pattern_n
     if hasattr(model, "fixed_A"):
         result_anndata.varm["fixed_A"] = pd.DataFrame(
             model.fixed_A.detach().cpu().numpy(),
-            columns=[str(p) for p in fixed_pattern_names],
+            columns=['fixed_' + str(p) for p in fixed_pattern_names],
             index=result_anndata.var.index,
         )
         print("Saving fixed A in anndata.varm['fixed_A']")
@@ -1059,7 +1059,7 @@ def run_nmf(
     NB_probs=0.5, use_chisq=False, use_pois=False, use_tensorboard_id=None,
     spatial=False, plot_dims=None, scale=None, model_family=None,
     supervision_type=None, model=None, init_method='random', debug=False,
-    optimizer=pyro.optim.Adam({"lr": 0.1, "eps": 1e-08})
+    optimizer=pyro.optim.Adam({"lr": 0.1, "eps": 1e-08}), seed=123
 ):
     """
     Run supervised or unsupervised NMF analysis.
@@ -1087,6 +1087,7 @@ def run_nmf(
     Returns:
     - result_anndata: AnnData object with all results and metadata
     """
+    set_seed(seed)
     D, U, scale, device, coords = prepare_tensors(data, layer, uncertainty, scale, device, spatial)
     print(f"U is {U}")
     # regardless of which branch (supervised / unsupervised) is taken below.

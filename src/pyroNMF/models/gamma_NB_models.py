@@ -314,10 +314,14 @@ class Gamma_NegBinomial_SSFixedGenes(Gamma_NegBinomial_base):
         self.iter += 1 # keep a running total of iterations
 
         # Nested plates for pixel-wise independence
-        with pyro.plate("patterns", self.num_patterns, dim = -2):
-            with pyro.plate("genes", self.num_genes, dim = -1):
-                A = pyro.sample("A", dist.Gamma(self.loc_A, self.scale)) # sample A from Gamma
-        self.A = A.detach().clone()
+        if self.num_patterns > 0:
+            with pyro.plate("patterns", self.num_patterns, dim = -2):
+                with pyro.plate("genes", self.num_genes, dim = -1):
+                    A = pyro.sample("A", dist.Gamma(self.loc_A, self.scale)) # sample A from Gamma
+            self.A = A.detach().clone()
+        else:
+            A = torch.zeros((self.num_patterns, self.num_genes), device=self.loc_A.device)
+            self.A = A.detach().clone()
 
         # Nested plates for pixel-wise independence
         with pyro.plate("samples", self.num_samples, dim=-2):
@@ -500,10 +504,14 @@ class Gamma_NegBinomial_SSFixedSamples(Gamma_NegBinomial_base):
         self.A = A.detach().clone()
 
         # Nested plates for pixel-wise independence
-        with pyro.plate("samples", self.num_samples, dim=-2):
-            with pyro.plate("patterns_P", self.num_patterns, dim = -1):
-                P = pyro.sample("P", dist.Gamma(self.loc_P, self.scale)) # sample P from Gamma
-        self.P = P.detach().clone()
+        if self.num_patterns > 0:
+            with pyro.plate("samples", self.num_samples, dim=-2):
+                with pyro.plate("patterns_P", self.num_patterns, dim = -1):
+                    P = pyro.sample("P", dist.Gamma(self.loc_P, self.scale)) # sample P from Gamma
+            self.P = P.detach().clone()
+        else:
+            P = torch.zeros((self.num_samples, self.num_patterns), device=self.loc_P.device)
+            self.P = P.detach().clone()
 
         P_total = torch.cat((self.fixed_P, P), dim=1)
         self.P_total = P_total.detach().clone() # save P_total
