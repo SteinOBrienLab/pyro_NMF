@@ -361,7 +361,7 @@ def run_inference_loop(svi, model, D, U, num_burnin, num_sample_steps, use_tenso
     ended_early = False
     for step in range(1, num_burnin + num_sample_steps + 1):
         try:
-            if step <= num_burnin+1:
+            if step <= num_burnin:
                 if U is not False:
                     loss = svi.step(D, U, samp=False)
                 else:
@@ -1016,7 +1016,7 @@ def save_results_to_anndata(result_anndata, model, losses, steps, runtime, scale
 
 
 def create_settings_dict(num_patterns, num_total_steps, num_sample_steps, device, NB_probs, use_chisq, scale, 
-                        model_type, use_tensorboard_id=None, writer=None):
+                        model_type,seed, use_tensorboard_id=None, writer=None):
     """
     Create settings dictionary for saving.
     
@@ -1043,7 +1043,8 @@ def create_settings_dict(num_patterns, num_total_steps, num_sample_steps, device
         'NB_probs': str(NB_probs),
         'use_chisq': str(use_chisq),
         'scale': str(scale),
-        'model_type': str(model_type)
+        'model_type': str(model_type),
+        'seed': str(seed)
     }
     
     if use_tensorboard_id is not None and writer is not None:
@@ -1127,7 +1128,7 @@ def run_nmf(
  
     settings = create_settings_dict(
         num_patterns, num_sample_steps + num_burnin, num_sample_steps,
-        device, NB_probs, use_chisq, scale, model_type,
+        device, NB_probs, use_chisq, scale, model_type, seed,
         use_tensorboard_id, writer
     )
  
